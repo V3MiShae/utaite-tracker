@@ -5,6 +5,8 @@
 #
 # https://github.com/lumpio/nicofetch
 
+# Adapted from non-working state.
+
 import sys
 import os, os.path, shutil
 import urllib, urllib2, cookielib
@@ -97,21 +99,11 @@ class VideoInfo:
         headers["Referer"] = "http://www.nicovideo.jp/watch/" + self.video_id
         return self._fetcher._request(self.video_url, data, headers)
 
-    def request_comments(self):
-        #comments_data = "<thread no_compress=\"0\" user_id=\"0\" when=\"0\" waybackkey=\"0\" res_from=\"-1000\" version=\"20061206\" thread=\"%s\" />" % (self.thread_id)
-        comments_data = ("<packet><thread thread=\"{0}\" version=\"20090904\" res_from=\"-1000\" /></packet>").format(self.thread_id)
-        return self._fetcher._request(self.comments_url, data=comments_data)
-
     def cleanup(self):
         if self._video_is_temp:
             os.remove(self._video_path)
             self._video_is_temp = False
             self._video_path = None
-
-        if self._comments_is_temp:
-            os.remove(self._comments_path)
-            self._comments_is_temp = False
-            self._comments_path = None
 
     def _get_path(self, path, default_ext):
         path = os.path.expanduser(path)
@@ -147,41 +139,11 @@ class VideoInfo:
     def save_video(self, path, progress_listener=None):
         new_path = self._get_path(path, self.video_extension)
         self.ensure_video_downloaded(progress_listener)
-        
+
         new_path = new_path + self.video_extension
         shutil.move(self._video_path, new_path)
         self._video_path = new_path
         self._video_is_temp = False
-
-    def ensure_comments_downloaded(self, progress_listener=None):
-        if not self._comments_path:
-            (comments_file, comments_path) = tempfile.mkstemp(prefix="nicofetch")
-            download_file(self.request_comments(), os.fdopen(comments_file, "w"), "comments", progress_listener)
-            self._comments_path = comments_path
-            self._comments_is_temp = True
-
-    def save_comments(self, path, progress_listener=None):
-        new_path = self._get_path(path, ".xml")
-        self.ensure_comments_downloaded()
-
-        shutil.move(self._comments_path, new_path)
-        self._comments_path = new_path
-        self._comments_is_temp = False
-
-    def extract_audio(self, path, format=".mp3", progress_listener=None):
-        self.ensure_video_downloaded(progress_listener)
-
-        out_path = self._get_path(path, format)
-
-        if self.video_extension == ".flv":
-            rv = subprocess.call(["mplayer", "-really-quiet", "-dumpaudio", "-dumpfile", out_path, self._video_path])
-        elif self.video_extension == ".swf":
-            rv = subprocess.call(["swfextract", "-m", "-o", out_path, self._video_path])
-        else:
-            rv = subprocess.call(["ffmpeg", "-i", self._video_path, "-vn",
-                "-acodec", "copy", out_path])
-
-        return rv == 0
 
 class NicoFetcher:
     VIDEO_ID_RE = re.compile(r"(?:/|%2F|^)([a-z]{2}\d+)")
@@ -222,6 +184,7 @@ class NicoFetcher:
         return self._opener.open(req)
 
     def authenticate(self, video_id):
+        # Attempt to gain permissions by just having logged in on the video page.
         self._request("https://secure.nicovideo.jp/secure/login?site=niconico",
             {"mail": self.mail, "password": self.password, "next_url": "/watch/" + video_id})
 
@@ -263,8 +226,8 @@ class NicoFetcher:
 
         mo = self.LOGGED_MOVIE_TYPE_RE.search(watch_data)
         if mo is None:
+            # Assume mp4 if information cannot be found.
             vid.video_extension = ".mp4"
-            #raise error("Error parsing watch result (no movie type)")
         else:
             vid.video_extension = "." + mo.group(1).lower()
 
@@ -274,29 +237,6 @@ class NicoFetcher:
             return False
 
         return True
-
-    def _fetch_thumb(self, vid):
-        thumb_data = self._request_data("http://ext.nicovideo.jp/thumb_watch/" + vid.video_id,
-            headers={"Referer": "http://fc2.com/"})
-
-        mo = self.THUMB_KEY_RE.search(thumb_data)
-        if mo is None:
-            #print thumb_data
-            raise error("Error parsing thumb_watch result (no key)")
-        thumb_key = mo.group(1)
-
-        mo = self.THUMB_MOVIE_TYPE_RE.search(thumb_data)
-        if mo is None:
-            raise error("Error parsing thumb_watch result (no movie type)")
-        vid.video_extension = "." + mo.group(1).lower()
-
-        mo = self.THUMB_VIDEO_TITLE_RE.search(thumb_data)
-        if mo is None:
-            vid.title = unicode(video_id)
-        else:
-            vid.title = js_unescape(mo.group(1))
-
-        self._fetch_video_data(vid, "http://ext.nicovideo.jp/thumb_watch/" + vid.video_id + "/" + thumb_key)
 
     def fetch(self, video_id):
         vid = VideoInfo(self)

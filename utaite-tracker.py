@@ -1,14 +1,17 @@
-import requests
 import re
 import os
 import sys
 import ConfigParser
 import logging
 import subprocess
-import nicofetch
 import getpass
 import warnings
+import codecs
 from HTMLParser import HTMLParser
+
+import requests
+
+import nicofetch
 
 config_path = "config.cfg"
 utaites_path = "utaites.txt"
@@ -31,10 +34,13 @@ knownGroups = [["After the Rain"], ["Mafumafu", "Soraru"], ["Soralon"],
                ["Soraru", "Lon"], ["Urata", "Shima", "Aho no Sakata", "Senra"],
                ["96Neko", "Kogeinu", "vipTenchou"], ["Team Pet Shop"], ["USSS"]]
 
-# Regex and fetch from wikia by Stephen Chen
+# Regex and fetch from wikia by Stephen Chen.
 
+# CREATE REGEX.
 # Pulls out each bulleted item that has an nicovideo reference in it.
 listItemRegex = r'<li>.+?href="http://www.nicovideo.jp/watch/(.+?)"(?:.|[\n\r])+?</li>'
+
+unavailableRegex = re.compile(r'<b>(.*?)</b>')
 
 # Titles are a bit weird
 titleRegex = []
@@ -62,22 +68,44 @@ singerRegex.append(re.compile(r'^<a.*?>(.*?)</a>(, and |, | and |)(.*)$'))
 # Capture the last artist in the list.
 finalSingerRegex = re.compile(r'<a.*>(.*?)</a>')
 
+# Used to remove links in featured artists or subtitles.
 a_href_regex = re.compile(r'^(.*)<a.*>(.*?)</a>(.*)$')
+
+# Used to extract the number of a numbered file to check whether or not a
+# particular song has been downloaded already.
 numberedFileRegex = re.compile(r'^(\d*) .*?')
 
+# Used to get the audio encoding format of the video file determined by ffmpeg.
+# Origin stream number is allowed to be anything because of strange encoding
+# in one Hanatan song.
 AudioEncodingRegex = re.compile(r'Stream #0:\d -> #0:1 \((.*?) \(')
 
 def progress_indicator(item, total_bytes, bytes_read, bytes_per_second):
     bar_length = 40
     bar_fill = int((float(bytes_read) / float(total_bytes)) * float(bar_length))
-    # \x1B[2K\x1B[1000D
     print("\r{0}: [{1}] {2}/{3} kB ({4} kB/s)".format(
         item,
         "=" * bar_fill + "-" * (bar_length - bar_fill),
         int(bytes_read / 1024),
         int(total_bytes / 1024),
-        int(bytes_per_second / 1024)).ljust(79)),
+        int(bytes_per_second / 1024)).ljust(80)),
     sys.stdout.flush()
+
+# Remove disallowed characters from the given string so that it
+# obeys Windows file and folder name conventions.
+def fileSafe(s):
+    s = s.replace("<", " ")
+    s = s.replace(">", " ")
+    s = s.replace(":", " ")
+    s = s.replace("\"", " ")
+    s = s.replace("/", " ")
+    s = s.replace("\\", " ")
+    s = s.replace("|", " ")
+    s = s.replace("?", " ")
+    s = s.replace("*", " ")
+    while(s.endswith(" ") or s.endswith(".")):
+        s = s[:-1]
+    return s
 
 artistsDone = []
 
@@ -101,16 +129,14 @@ while logged_in is False:
 
 # MAIN LOOP
 # Loop over all the artists in the utaite file.
-with open(utaites_path, 'r') as utaites:
+with codecs.open(utaites_path, 'r', 'utf-8') as utaites:
     for utaite in utaites:
         utaite = utaite.rstrip()
-        utaite = utaite.replace(" ", "_")
         if not utaite: continue
-        dirFriendlyUtaite = utaite.replace(":", "")
-        dirFriendlyUtaite = dirFriendlyUtaite.replace(".", "")
-        utaiteDir = utaiteBaseDir + dirFriendlyUtaite + "\\" + dirFriendlyUtaite + " NND\\"
 
-        utaitePageUrl = utaitePageUrlBase + utaite
+        utaiteDir = utaiteBaseDir + fileSafe(utaite) + "\\" + fileSafe(utaite) + " NND\\"
+
+        utaitePageUrl = utaitePageUrlBase + utaite.replace(" ", "_")
         r = requests.get(utaitePageUrl)
         h = HTMLParser()
 
@@ -125,10 +151,18 @@ with open(utaites_path, 'r') as utaites:
             for match in re.finditer(listItemRegex, s):
                 track = track + 1
 
+                item = match.group(0)
+
+                # DETERMINE IF THE TRACK IS UNAVAILABLE ON NND.
+                avail_match = unavailableRegex.search(item)
+                if avail_match is not None:
+                    if ("Private" in avail_match.group(1)) or ("Taken down on NND" in avail_match.group(1)):
+                       continue
+
                 # CHECK IF THE TRACK HAS ALREADY BEEN DOWNLOADED.
                 # Create folders if they do not exist.
-                if not os.path.isdir(utaiteBaseDir + dirFriendlyUtaite):
-                    os.mkdir(utaiteBaseDir + dirFriendlyUtaite)
+                if not os.path.isdir(utaiteBaseDir + fileSafe(utaite)):
+                    os.mkdir(utaiteBaseDir + fileSafe(utaite))
                 if not os.path.isdir(utaiteDir):
                     os.mkdir(utaiteDir)
 
@@ -144,7 +178,6 @@ with open(utaites_path, 'r') as utaites:
 
                 if found: continue
 
-                item = match.group(0)
                 title = None
                 # Match the title.
                 for tRegex in titleRegex:
@@ -188,6 +221,8 @@ with open(utaites_path, 'r') as utaites:
                         artists.append(artist)
                         rest = newRest
 
+                        change = False
+
                         while separator == ", ":
                             for sRegex in singerRegex:
                                 sm = sRegex.search(rest)
@@ -195,8 +230,12 @@ with open(utaites_path, 'r') as utaites:
                                     artist = sm.group(1)
                                     separator = sm.group(2)
                                     newRest = sm.group(3)
+                                    change = True
+                            if not change:
+                                break
                             artists.append(artist)
                             rest = newRest
+                            change = False
 
                         fs = finalSingerRegex.search(rest)
                         if fs is None:
@@ -216,7 +255,7 @@ with open(utaites_path, 'r') as utaites:
 
                 # Determine if the collaboration has been downloaded already.
                 for artist in artists:
-                    if artist in artistsDone:
+                    if artist.lower() in artistsDone:
                         downloadSong = False
 
                 nicoUrl = match.group(1)
@@ -237,9 +276,7 @@ with open(utaites_path, 'r') as utaites:
                             sys.exit()
 
                         # Download the video.
-                        audio_dir = utaiteDir + str(track) + " " + title
-                        # Replace disallowed characters.
-                        audio_dir = audio_dir.replace("?", " ")
+                        audio_dir = utaiteDir + str(track) + " " + fileSafe(title)
 
                         try:
                             vid.save_video(audio_dir, progress_indicator)
@@ -255,23 +292,33 @@ with open(utaites_path, 'r') as utaites:
                         sys.stdout.write("Converting...")
                         sys.stdout.flush()
 
+                        # Build featured artists string.
                         featured = ""
                         for artist in artists:
                             featured = featured + artist + ", "
+
+                        # Remove trailing comma and space.
                         featured = featured[:-2]
 
-                        artist_tag = utaite.replace("_", " ")
+                        # Build the tags for the audio file.
+                        artist_tag = utaite
                         title_tag = title
                         if featured is not "":
                             title_tag = title_tag + " (feat. " + featured + ")"
-                        album_tag = utaite.replace("_", " ") + " NND"
+                        album_tag = utaite + " NND"
                         genre_tag = "Utaite"
                         track_tag = str(track)
 
+                        # Determine the encoding of the audio by decoding with
+                        # ffmpeg into a null output. This will give informaiton
+                        # about the video file streams without creating any
+                        # other files.
                         vid_info = subprocess.check_output(["ffmpeg", "-i",
                             vid._video_path, '-f', 'null', '-'],
                             stderr=subprocess.STDOUT)
 
+                        # Find the audio stream, which should be output to
+                        # stream #0:1.
                         audio_match = AudioEncodingRegex.search(vid_info)
                         if audio_match is None:
                             print " Error!"
@@ -280,6 +327,7 @@ with open(utaites_path, 'r') as utaites:
                         else:
                             encoding = audio_match.group(1)
 
+                            # Translate encoding to file format.
                             if encoding == "aac":
                                 output_format = ".m4a"
                             elif encoding == "mp3":
@@ -290,6 +338,8 @@ with open(utaites_path, 'r') as utaites:
                                 print ""
                                 continue
 
+                            # Direct output to null to avoid crowding the
+                            # terminal window.
                             FNULL = open(os.devnull, 'w')
                             subprocess.call(['ffmpeg', '-i', vid._video_path, '-vn',
                                 '-acodec', 'copy', '-metadata', 'title=' + title_tag,
@@ -307,4 +357,6 @@ with open(utaites_path, 'r') as utaites:
                             # CLEAN UP UNNEEDED FILES.
                             os.remove(vid._video_path)
 
-        artistsDone.append(utaite.replace("_", " "))
+        # Mark the artist as having been completed to avoid downloading copies
+        # of collaborations.
+        artistsDone.append(utaite.lower())
